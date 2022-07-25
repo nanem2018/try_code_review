@@ -1,0 +1,260 @@
+today=ParseDate(Date());
+var id_programm;
+id_group_hrs=OptInt(Param.id_hr_group);//динамическая группа для HR
+
+
+//группа для всех HR
+try
+{
+	group_hrs_doc=tools.open_doc(id_group_hrs);
+	group_hrs_doc_te=group_hrs_doc.TopElem;
+}
+catch(errGhr)
+{alert('Ошибка в доступе к группе hr'+errGhr);}
+//все программы адаптации, которые созданы сегодня
+
+coll_adaptation_today=XQuery("for $elem in career_reserves where $elem/position_type='adaptation' and ($elem/status='plan' or $elem/status='active') and $elem/start_date>=date('"+today+"') and $elem/code='' return $elem");
+
+for(col in coll_adaptation_today)
+{
+	try{
+		//находим типовую программу развития сотрудника проходящего адаптацию	
+		
+		try
+		{
+			id_position_comm_col=col.person_id.ForeignElem.position_id.ForeignElem.position_common_id;
+			id_position_comm_col_doc=tools.open_doc(id_position_comm_col);
+			id_position_comm_col_doc_te=id_position_comm_col_doc.TopElem;
+		}
+		catch(errProgramm){alert('Ошибка в ТПР сотрудника '+col.person_id);}
+		for(tp in id_position_comm_col_doc_te.typical_development_programs)
+		{
+			id_programm=tp.typical_development_program_id;
+		}
+
+		typical_development_program_doc=tools.open_doc(id_programm);
+		typical_development_programdoc_te=typical_development_program_doc.TopElem;
+		id_programm_for_hr = typical_development_programdoc_te.custom_elems.ObtainChildByKey('tpr_hr').value;//Программа для HR 
+		id_programm_for_boss= typical_development_programdoc_te.custom_elems.ObtainChildByKey('tpr_boss').value;//Программа для руководителя
+
+
+		//Находим руководителя, которому назначаем адаптацию(стоит в должности, что он руководитель подразделения )
+		_boss_flag=false;
+		arr_bosses = tools.get_uni_user_bosses ( col.person_id, { return_object_type: null, return_object_value: func_managers} );
+		for(boss_Elem in arr_bosses)
+		{
+			
+			if(boss_Elem.catalog=='position')
+			{ 
+				main_manager_id=boss_Elem.person_id;
+				_boss_new_doc=tools.open_doc(id_programm_for_boss);//Объявление ТПР для boss
+				_doc_boss=_boss_new_doc.TopElem;
+				//проверка на уже созданную программу на него по этому сотруднику			
+				arr_is_boss_adaptation=XQuery("for $elem in career_reserves where $elem/position_type='adaptation' and ($elem/status='plan' or $elem/status='active') and $elem/person_id="+boss_Elem.person_id+" return $elem");
+				
+				for(cboss in arr_is_boss_adaptation)
+				{
+					try
+					{
+						b_doc=tools.open_doc(cboss.id);
+						te_b_doc=b_doc.TopElem;
+						
+						if(OptInt(te_b_doc.custom_elems.ObtainChildByKey('id_adaptation_col').value)==OptInt(col.id)){
+							//у руководителя есть адаптация по этому сотруднику
+							_boss_flag=true;
+						}
+					}
+					catch(errBossflag){alert('Ошибка в поиске программ сопровождения руководителя '+boss_Elem.person_id)}
+				}
+	
+				if(_boss_flag==false)
+				{
+					try
+					{
+						if(_boss_new_doc!=undefined)
+						{						
+							_pdoc = tools.new_doc_by_name("career_reserve");
+							_pdoc.BindToDb(DefaultDb);
+							_pdoc.TopElem.status = 'active';
+							_pdoc.TopElem.code = '_boss_to_';
+							_pdoc.TopElem.person_id =main_manager_id ;
+							_pdoc.TopElem.position_type = "adaptation";
+							_pdoc.TopElem.start_date = Date();
+							//добавление Рук-лю адаптации сотрудника в кастомное поле
+							_pdoc.TopElem.custom_elems.ObtainChildByKey('id_adaptation_col').value=Int(col.id);
+							
+							if (ArrayCount(_doc_boss.tasks)>0)
+							{
+								_pdoc.TopElem.plan_readiness_date = tools.AdjustDate(Date(), OptInt(ArrayMax(_doc_boss.tasks,"OptInt(This.due_date,0)").due_date,0) )///
+							}
+							//_pdoc.Save();
+							
+							try
+							{
+								for (_task in _doc_boss.tasks)
+								{
+									newTask = _pdoc.TopElem.tasks.AddChild();
+									newTask.id = _task.id;
+									newTask.name = _task.name+' ('+String(col.person_id.ForeignElem.fullname)+', '+String(col.person_id.ForeignElem.position_name)+')';
+									newTask.parent_task_id = _task.parent_task_id;
+									newTask.type = _task.type;
+									newTask.object_type = _task.object_type;
+									newTask.desc = _task.desc;
+									newTask.start_date = tools.AdjustDate(DateNewTime(Date(), 00, 00, 00), _task.due_date);
+									newTask.plan_date = tools.AdjustDate(newTask.start_date, _task.duration_days);
+									//newTask.tutor_id = my_manager != undefined ? my_manager.person_id : _usr_sub_fm != undefined ? _usr_sub_fm.person_id : "";
+									newTask.object_id = _task.object_id;
+									newTask.type_document = _task.type_document;
+									newTask.link_document = _task.link_document;
+									newTask.forbid_task_portal_edit = _task.forbid_task_portal_edit;
+									newTask.typical_development_program_id =id_programm_for_boss;
+									
+									
+									if(String(_task.custom_elems.ObtainChildByKey('is_self_made').value)=='true')
+									{
+										newTask.custom_elems.ObtainChildByKey('self_made').value='true';
+									}
+									
+								}	
+								_pdoc.Save();
+								
+							}
+							catch(err)
+							{
+							}
+						}
+					}
+					catch(errPrBoss){alert('Программа руководителю не назначена '+errPrBoss);}
+				}
+			}
+		}
+
+		//находим HR из динамической группы, совпадает подразделение,которое указано после организации(Округ)
+		_hr_flag=false;
+		arr_hr_cols = Trim(String(tools.person_list_staff_by_person_id(col.person_id,'', 2, 1))).split('->');//Название подразделения из должности у сотрудника
+		_hr_col_name=Trim(String(arr_hr_cols[0]));
+		
+		for(elem_hr in group_hrs_doc_te.collaborators)
+		{
+			arr_hr_subs = Trim(String(tools.person_list_staff_by_person_id(elem_hr.collaborator_id,'', 2, 1))).split('->');//Название подразделения из должности у hr
+			
+
+			if(ArrayCount(arr_hr_subs)>0 && ArrayCount(arr_hr_cols)>0)
+			{
+				
+				_hr_sub_name=Trim(String(arr_hr_subs[0]));
+			
+				if(_hr_col_name==_hr_sub_name)
+				{
+					
+					
+					if(String(elem_hr.collaborator_id.ForeignElem.position_name)=='Руководитель управления')
+					{
+						hr_id_for_adaptation=elem_hr.collaborator_id;
+						_new_doc=tools.open_doc(id_programm_for_hr);//Объявление ТПР для hr
+						_doc=_new_doc.TopElem;
+						if(_new_doc!=undefined)
+						{
+							
+							//проверка на уже созданную программу на него по этому сотруднику
+							
+							
+							arr_is_hr_adaptation=XQuery("for $elem in career_reserves where $elem/position_type='adaptation' and ($elem/status='plan' or $elem/status='active') and $elem/person_id="+elem_hr.collaborator_id+" return $elem");
+							
+							for(chr in arr_is_hr_adaptation)
+							{
+								if(chr.id!=undefined)
+								{
+									hr_doc=tools.open_doc(chr.id);
+									te_hr_doc=hr_doc.TopElem;
+								}
+								if(OptInt(te_hr_doc.custom_elems.ObtainChildByKey('id_adaptation_col').value)==OptInt(col.id)){
+									//у руководителя есть адаптация по этому сотруднику
+									_hr_flag=true;
+								}
+							}
+
+							if(_hr_flag==false)
+							{
+								//Добавление в карточку сотрудника HR  в роли Hr
+								try{
+								doc_adoptation=tools.open_doc(OptInt(col.id));
+								te_doc_adoptation=doc_adoptation.TopElem;
+								new_tutor=te_doc_adoptation.tutors.AddChild();
+								new_tutor.person_id=OptInt(elem_hr.collaborator_id);
+								tools.common_filling('collaborator', new_tutor, OptInt(elem_hr.collaborator_id));
+								new_tutor.boss_type_id=7054819616329579839;
+								new_tutor.is_native=0;
+								new_tutor.is_responsible=0;
+								doc_adoptation.Save();
+								}
+								catch(errAddTutorHR){alert('HR не добавлен в карточку адаптации сотруднику '+col.fullname+', '+errAddTutorHR)}
+							
+								try
+								{
+									//alert('создание адаптации для HR');						
+									_pdoc = tools.new_doc_by_name("career_reserve");
+									_pdoc.BindToDb(DefaultDb);
+									_pdoc.TopElem.status = 'active';
+									_pdoc.TopElem.code = '_hr_to_';
+									_pdoc.TopElem.person_id = hr_id_for_adaptation;
+									_pdoc.TopElem.position_type = "adaptation";
+									_pdoc.TopElem.start_date = Date();
+									//добавление hr карточки адаптации сотрудника по сопровождению
+									_pdoc.TopElem.custom_elems.ObtainChildByKey('id_adaptation_col').value=Int(col.id);
+									if (ArrayCount(_doc.tasks)>0)
+									{
+										_pdoc.TopElem.plan_readiness_date = tools.AdjustDate(Date(), OptInt(ArrayMax(_doc.tasks,"OptInt(This.due_date,0)").due_date,0) )
+									}
+									_pdoc.Save();
+								
+									try
+									{
+										for (_task in _doc.tasks)
+										{
+											
+											newTask = _pdoc.TopElem.tasks.AddChild();
+											newTask.id = _task.id;
+											newTask.name = _task.name+' ('+String(col.person_id.ForeignElem.fullname)+', '+String(col.person_id.ForeignElem.position_name)+')';
+											newTask.parent_task_id = _task.parent_task_id;
+											newTask.type = _task.type;
+											newTask.object_type = _task.object_type;
+											newTask.desc = _task.desc;
+											newTask.start_date = tools.AdjustDate(DateNewTime(Date(), 00, 00, 00), _task.due_date);
+											newTask.plan_date = tools.AdjustDate(newTask.start_date, _task.duration_days);
+											//newTask.tutor_id = my_manager != undefined ? my_manager.person_id : _usr_sub_fm != undefined ? _usr_sub_fm.person_id : "";
+											newTask.object_id = _task.object_id;
+											newTask.type_document = _task.type_document;
+											newTask.link_document = _task.link_document;
+											newTask.forbid_task_portal_edit = _task.forbid_task_portal_edit;
+											newTask.typical_development_program_id =id_programm_for_hr;
+											
+											if(String(_task.custom_elems.ObtainChildByKey('is_self_made').value)=='true')
+											{
+								
+												newTask.custom_elems.ObtainChildByKey('self_made').value='true';
+								
+											}
+											
+										}	
+										_pdoc.Save();
+										
+									}
+									catch(err)
+									{
+									}
+								}
+								catch(errPrHr){alert('Программа hr не назначена '+errPrHr)}
+							}	
+						}
+						
+					}
+				}
+				
+				
+			}	
+		}
+
+	}
+	catch(errCol){alert('Ошибка при назначении карточек сопровождения для сотрудника '+col.person_fullname);}
+}
